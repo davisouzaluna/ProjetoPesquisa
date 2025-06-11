@@ -21,20 +21,26 @@ if (DEBUG)
   endif (TSAN)
 endif (DEBUG)
 
-add_executable(sub_quic sub.c)
-add_executable(pub_quic pub.c)
-
+add_executable(publisher  pub.c )
+add_executable(sub sub.c)
+#add_executable(sub2 sub_2.c)
 
 if(OPENSSL_FOUND)
     include_directories(${OPENSSL_INCLUDE_DIRS})
-    target_link_libraries(sub_quic OpenSSL::Crypto OpenSSL::SSL)
-    target_link_libraries(pub_quic OpenSSL::Crypto OpenSSL::SSL)
+    target_link_libraries(publisher OpenSSL::Crypto OpenSSL::SSL)
+    target_link_libraries(sub OpenSSL::Crypto OpenSSL::SSL)
 endif()
 
 
-target_link_libraries(sub_quic nng::nng msquic pthread hiredis)
-target_compile_definitions(sub_quic PRIVATE NNG_ELIDE_DEPRECATED)
+target_link_libraries(sub nng::nng msquic pthread hiredis)
+target_compile_definitions(sub PRIVATE NNG_ELIDE_DEPRECATED)
+
+#target_link_libraries(sub2 nng::nng msquic pthread hiredis)
+#target_compile_definitions(sub2 PRIVATE NNG_ELIDE_DEPRECATED)
+
+target_link_libraries(publisher nng::nng msquic pthread hiredis) 
+target_compile_definitions(publisher PRIVATE NNG_ELIDE_DEPRECATED
+)
 
 
-target_link_libraries(pub_quic nng::nng msquic pthread hiredis)
-target_compile_definitions(pub_quic PRIVATE NNG_ELIDE_DEPRECATED)
+
