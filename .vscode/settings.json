@@ -1,6 +1,7 @@
 {
     "files.associations": {
         "tls.h": "c",
-        "platform.h": "c"
+        "platform.h": "c",
+        "msquic.h": "c"
     }
 }

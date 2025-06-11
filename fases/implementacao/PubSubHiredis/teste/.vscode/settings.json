@@ -10,6 +10,7 @@
         "assert.h": "c",
         "time.h": "c",
         "platform.h": "c",
-        "stdio.h": "c"
+        "stdio.h": "c",
+        "cerrno": "c"
     }
 }
