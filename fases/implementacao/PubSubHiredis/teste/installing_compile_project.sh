@@ -116,7 +116,7 @@ fi
 #Instalando o NanoSDK
 if [ ! -d "./NanoSDK" ]; then
     echo "Clonando e instalando o NanoSDK..."
-    git clone https://github.com/emqx/NanoSDK.git
+    git clone --branch v0.10.1 --depth 1 https://github.com/emqx/NanoSDK.git
     cd NanoSDK
     git submodule update --init --recursive 
     mkdir build && cd build
