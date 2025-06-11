@@ -25,6 +25,7 @@
 #include <time.h>
 #include <sys/time.h>
 
+
 #include "msquic.h"
 
 #include <stdio.h>
@@ -42,7 +43,6 @@
 #define CONN 1
 #define SUB 2
 #define PUB 3
-#define UNSUB 4
 
 static nng_socket  g_sock;
 const char * g_redis_key; //chave padrao para salvar no redis
@@ -74,56 +74,11 @@ typedef struct {
     const char *redis_key;
 } RedisParams;
 
-
-
 static void
 fatal(const char *msg, int rv)
 {
 	fprintf(stderr, "%s: %s\n", msg, nng_strerror(rv));
 }
-
-// manter a conexao ativa
-void enviar_pingreq(nng_socket sock)
-{
-    nng_msg *msg;
-    int rv;
-
-    if ((rv = nng_mqtt_msg_alloc(&msg, 0)) != 0)
-    {
-        fatal("nng_msg_alloc", rv);
-    }
-
-    nng_mqtt_msg_set_packet_type(msg, NNG_MQTT_PINGREQ);
-    //nng_msg_set_cmd_type(msg, NNG_MQTT_PINGREQ);
-
-    // Enviar pacote
-    if ((rv = nng_sendmsg(sock, msg, 0)) != 0)
-    {
-        fatal("nng_sendmsg", rv);
-    }
-
-    printf(" PINGREQ enviado manualmente para manter a sessão ativa.\n");
-    
-}
-
-void* ping_thread_func(void* arg) {
-    while (1) {
-        nng_msleep(30000); // 30 segundos
-        enviar_pingreq(g_sock);
-    }
-    return NULL;
-}
-
-// Em algum lugar após a conexão ser estabelecida, crie a thread:
-void start_ping_thread() {
-    pthread_t ping_thread;
-    if (pthread_create(&ping_thread, NULL, ping_thread_func, NULL) != 0) {
-        perror("Erro ao criar thread de ping");
-        exit(EXIT_FAILURE);
-    }
-    pthread_detach(ping_thread); // para não precisar dar join
-}
-
 void store_in_redis(const char *value, const char *redis_key) {
     // Conectar ao servidor Redis na porta 6379 (padrão)
     redisContext *context = redisConnect("127.0.0.1", 6379);
@@ -253,23 +208,117 @@ char *diferenca_para_varchar(long long diferenca) {
 
 
 
-static nng_msg *compose_publish(int type, int qos, char *topic, char *payload) {
-    nng_msg *msg;
-    nng_mqtt_msg_alloc(&msg, 0);
 
-   if (type == PUB) {
+static nng_msg *
+mqtt_msg_compose(int type, int qos, char *topic, char *payload)
+{
+	// Mqtt connect message
+	nng_msg *msg;
+	nng_mqtt_msg_alloc(&msg, 0);
+
+	if (type == CONN) {
+		nng_mqtt_msg_set_packet_type(msg, NNG_MQTT_CONNECT);
+
+		nng_mqtt_msg_set_connect_proto_version(msg, 4);
+		nng_mqtt_msg_set_connect_keep_alive(msg, 30);
+		nng_mqtt_msg_set_connect_clean_session(msg, true);
+	} else if (type == SUB) {
+		nng_mqtt_msg_set_packet_type(msg, NNG_MQTT_SUBSCRIBE);
+
+		nng_mqtt_topic_qos subscriptions[] = {
+			{
+				.qos   = qos,
+				.topic = {
+					.buf    = (uint8_t *) topic,
+					.length = strlen(topic)
+				}
+			},
+		};
+		int count = sizeof(subscriptions) / sizeof(nng_mqtt_topic_qos);
+
+		nng_mqtt_msg_set_subscribe_topics(msg, subscriptions, count);
+	} 
+	else if (type == PUB) {
         nng_mqtt_msg_set_packet_type(msg, NNG_MQTT_PUBLISH);
         nng_mqtt_msg_set_publish_dup(msg, 0);
         nng_mqtt_msg_set_publish_qos(msg, qos);
         nng_mqtt_msg_set_publish_retain(msg, 0);
         nng_mqtt_msg_set_publish_topic(msg, topic);
         nng_mqtt_msg_set_publish_payload(msg, (uint8_t *)payload, strlen(payload));
-    }
-
-
-    return msg;
+    } 
+	return msg;
 }
-int publish(const char *topic, int qos, const char *operation, int val1, int val2, int *msg_sent) {
+
+void subscription(nng_socket sock, const char *topic, const char *qos) {
+	int q;
+	q =atoi(qos);
+    nng_msg *msg = mqtt_msg_compose(SUB, q, (char *)topic, NULL);
+    if (msg == NULL) {
+        printf("Failed to compose subscribe message.\n");
+        return;
+    }
+    int rv = nng_sendmsg(sock, msg, NNG_FLAG_ALLOC);
+    if (rv != 0) {
+        printf("Failed to send subscribe message: %d\n", rv);
+		nng_msleep(1000);//esperar umm segundo para tentar novamente
+    } else {
+        //printf("Successfully subscribed to topic: %s\n", topic);
+    }
+	//return rv,msg;
+}
+
+
+
+static int
+connect_cb(void *rmsg, void * arg)
+{
+	printf("[Connected][%s]...\n", (char *)arg);
+
+	//Se o contador for 1 e o type for um subscriber
+	if((g_count >= 1) && (g_type == SUB)){
+
+		subscription(g_sock, g_topic, g_qos);
+	}
+	g_count ++;
+	
+	return 0;
+}
+
+static int
+disconnect_cb(void *rmsg, void * arg)
+{
+	printf("[Disconnected][%s]...\n", (char *)arg);
+	
+	return 0;
+	/*
+	static int retry_count = 0;
+	printf("[Disconnected][%s]...\n", (char *)arg);
+	return 0;
+	printf("tentando reconexao...\n");
+
+	int backoff_time = (1 << retry_count); //Algoritmo de exponencial backoff
+	// Reenviar a mensagem de conexão
+	nng_msg *msg = mqtt_msg_compose(CONN, 0, NULL);
+    nng_sendmsg(*g_sock, msg, NNG_FLAG_ALLOC);
+
+	nng_msleep(backoff_time * 1000); //Esperar um tempo exponencialmente crescente	
+	retry_count++;
+    // Reinscrever-se no tópico
+    //subscription(g_sock, g_topic, g_qos);
+
+    return 0;
+	*/
+}
+
+static int
+msg_send_cb(void *rmsg, void * arg)
+{
+	printf("[Msg Sent][%s]...\n", (char *)arg);
+	
+	return 0;
+}
+
+int publish_operation_resolved(const char *topic, int qos, const char *operation, int val1, int val2, int *msg_sent) {
     int rv;
     *msg_sent = 0;
 
@@ -298,7 +347,7 @@ int publish(const char *topic, int qos, const char *operation, int val1, int val
         snprintf(payload, sizeof(payload), "%d", resultado);
     }
 
-    nng_msg *msg = compose_publish(PUB, qos, (char *)topic, payload);
+    nng_msg *msg = mqtt_msg_compose(PUB, qos, (char *)topic, payload);
     if (msg == NULL) {
         printf("Erro ao compor mensagem publish.\n");
         return -1;
@@ -322,144 +371,70 @@ int publish(const char *topic, int qos, const char *operation, int val1, int val
 }
 
 
-static nng_msg *
-mqtt_msg_compose(int type, int qos, char *topic)
+void publish(const char *topic, int q, int *msg_sent)
 {
-	// Mqtt connect message
-	nng_msg *msg;
-	nng_mqtt_msg_alloc(&msg, 0);
-
-	if (type == CONN) {
-		nng_mqtt_msg_set_packet_type(msg, NNG_MQTT_CONNECT);
-
-		nng_mqtt_msg_set_connect_proto_version(msg, 4);
-		nng_mqtt_msg_set_connect_keep_alive(msg, 30);
-		nng_mqtt_msg_set_connect_clean_session(msg, false);
-	} else if (type == SUB) {
-		nng_mqtt_msg_set_packet_type(msg, NNG_MQTT_SUBSCRIBE);
-
-		nng_mqtt_topic_qos subscriptions[] = {
-			{
-				.qos   = qos,
-				.topic = {
-					.buf    = (uint8_t *) topic,
-					.length = strlen(topic)
-				}
-			},
-		};
-		int count = sizeof(subscriptions) / sizeof(nng_mqtt_topic_qos);
-
-		nng_mqtt_msg_set_subscribe_topics(msg, subscriptions, count);
-	} 
-    else if (type == UNSUB) {
-        nng_mqtt_msg_set_packet_type(msg, NNG_MQTT_UNSUBSCRIBE);
-
-        nng_mqtt_topic topics[] = {
-            {
-                .buf    = (uint8_t *) topic,
-                .length = strlen(topic)
-            },
-        };
-        int count = sizeof(topics) / sizeof(nng_mqtt_topic);
-
-        nng_mqtt_msg_set_unsubscribe_topics(msg, topics, count);
-    }
     
+    *msg_sent = 0; // Reset the flag
+	char *tempo_atual_varchar = tempo_para_varchar();
+    nng_msg *msg = mqtt_msg_compose(PUB, q, (char *)topic, tempo_para_varchar());
+    printf("Tempo atual em varchar: %s\n", tempo_atual_varchar);
+    nng_sendmsg(g_sock, msg, NNG_FLAG_ALLOC);
 
-	return msg;
-}
-
-void subscription(nng_socket *sock, const char *topic, const char *qos) {
-	int q;
-	q =atoi(qos);
-    nng_msg *msg = mqtt_msg_compose(SUB, q, (char *)topic);
-    if (msg == NULL) {
-        printf("Failed to compose subscribe message.\n");
-        return;
+    // Wait for the message to be sent
+    while (!(*msg_sent)) {
+        nng_msleep(1); // Sleep for a short duration to avoid busy waiting
     }
-    int rv = nng_sendmsg(*sock, msg, NNG_FLAG_ALLOC);
-    if (rv != 0) {
-        printf("Failed to send subscribe message: %d\n", rv);
-		nng_msleep(1000);//esperar umm segundo para tentar novamente
-    } else {
-        //printf("Successfully subscribed to topic: %s\n", topic);
-    }
-	//return rv,msg;
+	*msg_sent = 0; // Reset the flag
+    free(tempo_atual_varchar);
 }
 
-
-
-static int
-connect_cb(void *rmsg, void * arg)
-{
-	printf("[Connected][%s]...\n", (char *)arg);
-
-	//Se o contador for 1 e o type for um subscriber
-	if((g_count >= 1) && (g_type == SUB)){
-
-		subscription(&g_sock, g_topic, g_qos);
-        start_ping_thread();
-	}
-	g_count ++;
-    
-	
-	return 0;
-}
-
-static int
-disconnect_cb(void *rmsg, void * arg)
-{
-	printf("[Disconnected][%s]...\n", (char *)arg);
-	
-	return 0;
-
-}
-
-static int
-msg_send_cb(void *rmsg, void * arg)
-{
-	printf("[Msg Sent][%s]...\n", (char *)arg);
-	
-	return 0;
-}
 
 
 //callback do subscriber
-static int msg_recv_cb(void *rmsg, void *arg)
-{
-    struct timespec tempo_sub = tempo_atual_timespec();
-    nng_msg *msg = rmsg;
-    uint32_t topicsz, payloadsz;
+static int
+msg_recv_cb(void *rmsg, void * arg)
+{	
+	int q = atoi(g_qos);
 
-    char *topic   = (char *)nng_mqtt_msg_get_publish_topic(msg, &topicsz);
-    char *payload = (char *)nng_mqtt_msg_get_publish_payload(msg, &payloadsz);
+	struct timespec tempo_sub;
+	tempo_sub = tempo_atual_timespec();
+	printf("[Msg Arrived][%s]...\n", (char *)arg);
+	nng_msg *msg = rmsg;
+	uint32_t topicsz, payloadsz;
 
-    printf("[Msg Arrived][%s]...\n", (char *)arg);
-    printf("topic   => %.*s\n", topicsz, topic);
-    printf("payload => %.*s\n", payloadsz, payload);
+	char *topic   = (char *)nng_mqtt_msg_get_publish_topic(msg, &topicsz);
+	char *payload = (char *)nng_mqtt_msg_get_publish_payload(msg, &payloadsz);
 
-    // Parse do payload para extrair operação e valores
-    char oper[16];
-    int v1, v2;
-    if (sscanf(payload, "%15s %d %d", oper, &v1, &v2) != 3) {
-        fprintf(stderr, "Erro: payload inválido. Esperado: <op> <val1> <val2>\n");
-        return 0;
-    }
+	struct timespec tempo_pub;
+	long long diferenca;
+	tempo_pub = string_para_timespec(payload);
+	diferenca = diferenca_tempo(tempo_sub, tempo_pub);//tempo do sub é o mais recente
+	char *valor_redis;
+	valor_redis = diferenca_para_varchar(diferenca);
 
-    // Construir tópico de resposta
-    char response_topic[256];
-    snprintf(response_topic, sizeof(response_topic), "%.*s/resultado", topicsz, topic);
-
-    // Flag de confirmação de envio
-    int flag = 0;
-
-    // Chamar publish com a operação, valores e tópico de resultado
-    publish(response_topic, 0, oper, v1, v2, &flag);
-    msg = mqtt_msg_compose(CONN, 0, NULL);
-	nng_sendmsg(g_sock, msg, NNG_FLAG_ALLOC);
-    //enviar_pingreq(g_sock);
-
-    return 0;
+   
+	printf("topic   => %.*s\n"
+	       "payload => %.*s\n",topicsz, topic, payloadsz, payload);
+		   char oper[16];
+		   int v1, v2;
+		   if (sscanf(payload, "%15s %d %d", oper, &v1, &v2) != 3) {
+			   fprintf(stderr, "Erro: payload inválido. Esperado: <op> <val1> <val2>\n");
+			   return 0;
+		   }
+	   
+		   // Construir tópico de resposta
+		   char response_topic[256];
+		   snprintf(response_topic, sizeof(response_topic), "%.*s/resultado", topicsz, topic);
+	   
+		   // Flag de confirmação de envio
+		   int flag = 0;
+	   
+		   // Chamar publish com a operação, valores e tópico de resultado
+		   publish_operation_resolved(response_topic, 0, oper, v1, v2, &flag);
+	//store_in_redis(valor_redis, g_redis_key);
+	//store_in_redis_async_call(valor_redis, g_redis_key);
+	return 0;
+	
 }
 
 
@@ -509,15 +484,15 @@ client(int type, const char *url, const char *qos, const char *topic, const char
 	switch (type) {
 	case CONN:
 				// MQTT Connect...
-		msg = mqtt_msg_compose(CONN, 0, NULL);
+		msg = mqtt_msg_compose(CONN, 0, NULL, NULL);
 	nng_sendmsg(sock, msg, NNG_FLAG_ALLOC);
 		break;
 	case SUB:
 			
         g_redis_key= redis_key; //aqui eu defino o valor da variavel global para que o callback possa acessar
-		msg = mqtt_msg_compose(CONN, 0, NULL);
+		msg = mqtt_msg_compose(CONN, 0, NULL, NULL);
 		nng_sendmsg(sock, msg, NNG_FLAG_ALLOC);
-		subscription(&sock, topic, qos);
+		subscription(sock, topic, qos);
 		printf("subscrito em : %s\n", topic);
 		
 			
