@@ -1,14 +1,11 @@
 #define _POSIX_C_SOURCE 199309L
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
 #include <unistd.h>
 #include <sys/time.h>
 #include <nng/nng.h>
-#include <nng/supplemental/util/platform.h>
 #include <nng/mqtt/mqtt_client.h>
 #include <nng/mqtt/mqtt_quic.h>
 #include "msquic.h"
+#include "../common.h"
 
 #include <time.h>
 
@@ -17,23 +14,12 @@
 #define CLOCK_REALTIME 0
 #endif
 
-#include <hiredis/hiredis.h>
-#include <pthread.h>
-
-#define CONN 1
-#define SUB 2
-#define PUB 3
-
-const char * g_redis_key; //chave padrao para salvar no redis
 static nng_socket g_sock;
 const char * g_topic; //topico padrao para se inscrever
 const char * g_qos;
 int g_count = 0; //contador para saber se é uma possível reconexão(quando o callback de conectado for chamado novamente ele incrementa o valor em 1 e entra dentro de u if que se subscreve novamente no tópico)	
 int g_type;
-struct timespec start_time_rtt, end_time_rtt;
 char g_alternative_topic[200];
-
-double time_connection;
 
 // Variáveis para rastrear o estado de reconexão
 static int is_reconnecting = 0;
@@ -59,149 +45,12 @@ conf_quic config_user = {
 };
 
 
-typedef struct {
-    const char *value;
-    const char *redis_key;
-} RedisParams;
-
-
-void store_in_redis(const char *value, const char *redis_key) {
-    // Conectar ao servidor Redis na porta 6379 (padrão)
-    redisContext *context = redisConnect("127.0.0.1", 6379);
-    if (context == NULL || context->err) {
-        if (context) {
-            printf("Erro na conexão com o Redis: %s\n", context->errstr);
-            redisFree(context);
-        } else {
-            printf("Erro na alocação do contexto do Redis\n");
-        }
-        return;
-    }
-
-    printf("Conectado ao servidor Redis\n");
-
-    // Salvar o valor no Redis com a chave fornecida ou "valores" como padrão
-    const char *key = redis_key && *redis_key ? redis_key : "valores";
-    redisReply *reply = redisCommand(context, "RPUSH %s \"%s\"", key, value);
-    if (reply == NULL) {
-        printf("Erro ao salvar os dados no Redis\n");
-        redisFree(context);
-        return;
-    }
-    printf("Valor salvo com sucesso no Redis: %s ,na chave: %s\n", value, redis_key );
-    freeReplyObject(reply);
-
-    // Encerrar a conexão com o servidor Redis
-    redisFree(context);
-}
-
-
-void* store_in_redis_async(void *params) {
-    RedisParams *redis_params = (RedisParams *)params;
-    store_in_redis(redis_params->value, redis_params->redis_key);
-    free(params); // Libera a memória alocada para os parametros
-    return NULL;
-}
-
-void store_in_redis_async_call(const char *value, const char *redis_key) {
-    pthread_t thread;
-    RedisParams *params = malloc(sizeof(RedisParams));
-    if (params == NULL) {
-        perror("Erro ao alocar memória para os parâmetros da thread");
-        exit(EXIT_FAILURE);
-    }
-    params->value = value;
-    params->redis_key = redis_key;
-
-    if (pthread_create(&thread, NULL, store_in_redis_async, params) != 0) {
-        perror("Erro ao criar a thread");
-        free(params); // Libera a memória alocada em caso de falha na criação da thread
-        exit(EXIT_FAILURE);
-    }
-
-    // opcional: Se não precisar esperar a thread terminar, você pode desanexá-la, por enquanto preferi deixar a thread rodando
-    pthread_detach(thread);
-}
-
-static void
-fatal(const char *msg, int rv)
-{
-	fprintf(stderr, "%s: %s\n", msg, nng_strerror(rv));
-}
 
 static int disconnect_cb(void *rmsg, void *arg)
 {
     printf("[Disconnected][%s]...\n", (char *)arg);
     is_reconnecting = 1; // Set the flag to indicate reconnection is needed
     return 0;
-}
-//retorna o tempo atual em timespec
-struct timespec tempo_atual_timespec() {
-    struct timespec tempo_atual;
-    clock_gettime(CLOCK_REALTIME, &tempo_atual);
-
-    return tempo_atual;
-}
-struct timespec string_para_timespec(char *tempo_varchar) {
-    struct timespec tempo;
-    char *ponto = strchr(tempo_varchar, '.');
-    if (ponto != NULL) {
-        *ponto = '\0'; // separa os segundos dos nanossegundos
-        tempo.tv_sec = atol(tempo_varchar);
-        tempo.tv_nsec = atol(ponto + 1);
-    } else {
-        tempo.tv_sec = atol(tempo_varchar);
-        tempo.tv_nsec = 0;
-    }
-    return tempo;
-}
-// Função para converter diferença de tempo em string
-char *diferenca_para_varchar(long long diferenca) {
-    char *tempo_varchar = (char *)malloc(MAX_STR_LEN * sizeof(char));
-    if (tempo_varchar == NULL) {
-        perror("Erro ao alocar memória");
-        exit(EXIT_FAILURE);
-    }
-    snprintf(tempo_varchar, MAX_STR_LEN, "%lld.%09lld", diferenca / 1000000000LL, diferenca % 1000000000LL);
-    return tempo_varchar;
-}
-
-// Função para calcular a diferença entre dois tempos em nanossegundos
-long long diferenca_tempo(struct timespec tempo1, struct timespec tempo2) {
-    long long diff_sec = (long long)(tempo1.tv_sec - tempo2.tv_sec);
-    long long diff_nsec = (long long)(tempo1.tv_nsec - tempo2.tv_nsec);
-    return diff_sec * 1000000000LL + diff_nsec;
-}
-
-
-static int
-msg_recv_cb(void *rmsg, void * arg)
-{	
-	struct timespec tempo_sub;
-	tempo_sub = tempo_atual_timespec();
-	printf("[Msg Arrived][%s]...\n", (char *)arg);
-	nng_msg *msg = rmsg;
-	uint32_t topicsz, payloadsz;
-
-	char *topic   = (char *)nng_mqtt_msg_get_publish_topic(msg, &topicsz);
-	char *payload = (char *)nng_mqtt_msg_get_publish_payload(msg, &payloadsz);
-
-    clock_gettime(CLOCK_REALTIME, &end_time_rtt);
-    
-	struct timespec tempo_pub;
-	long long diferenca;
-	tempo_pub = string_para_timespec(payload);
-	diferenca = diferenca_tempo(end_time_rtt, start_time_rtt);//tempo do sub é o mais recente
-	char *valor_redis;
-	valor_redis = diferenca_para_varchar(diferenca);
-
-   
-	printf("topic   => %.*s\n"
-	       "payload => %.*s\n",topicsz, topic, payloadsz, payload);
-	//store_in_redis(valor_redis, g_redis_key);
-	store_in_redis_async_call(valor_redis, g_redis_key);
-	return 0;
-	
 }
 
 
@@ -213,61 +62,6 @@ static int msg_send_cb(void *rmsg, void *arg)
     return 0;
 }
 
-static nng_msg *mqtt_msg_compose(int type, int qos, char *topic, char *payload)
-{
-    // Mqtt connect message
-    nng_msg *msg;
-    nng_mqtt_msg_alloc(&msg, 0);
-
-    if (type == CONN) {
-        nng_mqtt_msg_set_packet_type(msg, NNG_MQTT_CONNECT);
-        nng_mqtt_msg_set_connect_proto_version(msg, 4);
-        nng_mqtt_msg_set_connect_keep_alive(msg, 30);
-        nng_mqtt_msg_set_connect_clean_session(msg, true);
-    } else if (type == PUB) {
-        nng_mqtt_msg_set_packet_type(msg, NNG_MQTT_PUBLISH);
-        nng_mqtt_msg_set_publish_dup(msg, 0);
-        nng_mqtt_msg_set_publish_qos(msg, qos);
-        nng_mqtt_msg_set_publish_retain(msg, 0);
-        nng_mqtt_msg_set_publish_topic(msg, topic);
-        nng_mqtt_msg_set_publish_payload(msg, (uint8_t *)payload, strlen(payload));
-    }  else if (type == SUB) {
-		nng_mqtt_msg_set_packet_type(msg, NNG_MQTT_SUBSCRIBE);
-
-		nng_mqtt_topic_qos subscriptions[] = {
-			{
-				.qos   = qos,
-				.topic = {
-					.buf    = (uint8_t *) topic,
-					.length = strlen(topic)
-				}
-			},
-		};
-		int count = sizeof(subscriptions) / sizeof(nng_mqtt_topic_qos);
-
-		nng_mqtt_msg_set_subscribe_topics(msg, subscriptions, count);
-	} 
-
-    return msg;
-}
-void subscription(nng_socket sock, const char *topic, const char *qos) {
-	int q;
-    printf("debug");
-	q =0;
-    nng_msg *msg = mqtt_msg_compose(SUB, q, (char *)topic, NULL);
-    if (msg == NULL) {
-        printf("Failed to compose subscribe message.\n");
-        return;
-    }
-    int rv = nng_sendmsg(sock, msg, NNG_FLAG_ALLOC);
-    if (rv != 0) {
-        printf("Failed to send subscribe message: %d\n", rv);
-		nng_msleep(1000);//esperar umm segundo para tentar novamente
-    } else {
-        //printf("Successfully subscribed to topic: %s\n", topic);
-    }
-	//return rv,msg;
-}
 static int connect_cb(void *rmsg, void *arg)
 {
     //Se o contador for 1 e o type for um subscriber
@@ -288,54 +82,8 @@ static int connect_cb(void *rmsg, void *arg)
     return 0;
 }
 
-char *tempo_para_varchar()
-{
-    struct timespec tempo_atual;
-    clock_gettime(CLOCK_REALTIME, &tempo_atual);
 
-    char *tempo_varchar = (char *)malloc(MAX_STR_LEN * sizeof(char));
-    if (tempo_varchar == NULL) {
-        perror("Erro ao alocar memória");
-        exit(EXIT_FAILURE);
-    }
-
-    snprintf(tempo_varchar, MAX_STR_LEN, "%ld.%09ld", tempo_atual.tv_sec, tempo_atual.tv_nsec);
-
-    return tempo_varchar;
-}
-
-
-//Aqui é onde vai formalizar a mensagem de publish com a operação e os valores
-int publish_operation(const char *topic, int qos, const char *operation, int val1, int val2, int *msg_sent)
-{
-    int rv;
-    *msg_sent = 0;
-
-    char payload[64];
-    snprintf(payload, sizeof(payload), "%s %d %d", operation, val1, val2); 
-
-    nng_msg *msg = mqtt_msg_compose(PUB, qos, (char *)topic, payload);
-    if (msg == NULL) {
-        printf("Erro ao compor mensagem publish.\n");
-        return -1;
-    }
-
-    //tempo inicial. Guarda o tempo inicial para calcular o RTT
-    clock_gettime(CLOCK_REALTIME, &start_time_rtt);
-
-    if ((rv = nng_sendmsg(g_sock, msg, NNG_FLAG_NONBLOCK)) != 0) {
-        fatal("nng_sendmsg", rv);
-        return rv;
-    }
-
-    while (!(*msg_sent)) {
-        nng_msleep(1);
-    }
-
-    *msg_sent = 0;
-    return 0;
-}
-
+/*
 void publish(const char *topic, int q, int *msg_sent)
 {
     
@@ -352,7 +100,7 @@ void publish(const char *topic, int q, int *msg_sent)
 	*msg_sent = 0; // Reset the flag
     free(tempo_atual_varchar);
 }
-
+*/
 int client(int type, const char *url, const char *qos, const char *topic, const char *numero_pub, const char *interval, const char *redis_key)
 {
     nng_socket sock;
@@ -366,6 +114,7 @@ int client(int type, const char *url, const char *qos, const char *topic, const 
 	g_qos  =qos;
 	g_type = type;
     g_redis_key = redis_key;
+
 
     qpub = atoi(numero_pub);
 
@@ -408,23 +157,21 @@ int client(int type, const char *url, const char *qos, const char *topic, const 
     const char *operacoes[] = {"add", "sub", "mul", "div"};
     int topicsz = strlen(topic);
     
+    char qos_str[2];
+    snprintf(qos_str, sizeof(qos_str), "%d", q);
 	snprintf(g_alternative_topic, sizeof(g_alternative_topic), "%s/resultado", g_topic);
-    subscription(sock, g_alternative_topic, q);
+    subscription(&sock, g_alternative_topic, qos_str);
     if (numero_pub) {
         for (i = 0; i < qpub; i++) {
             int val1_rand = (rand() % 100) + 1;
             int val2_rand = (rand() % 100) + 1;
             const char *operacao_aleatoria = operacoes[rand() % 4];
             //publish(topic, q, &msg_sent);
-            publish_operation(topic, q, operacao_aleatoria, val1_rand, val2_rand, &msg_sent);
+            publish_operation(&sock,topic, q, operacao_aleatoria, val1_rand, val2_rand, &msg_sent);
             nng_msleep(intervalo);
         }
     }
 
-
-#if defined(NNG_SUPP_SQLITE)
-    sqlite_config(&sock, MQTT_PROTOCOL_VERSION_v311);
-#endif
 
     printf("terminou o envio\n");
     printf("Time taken to connect: %.9f seconds\n", time_connection);

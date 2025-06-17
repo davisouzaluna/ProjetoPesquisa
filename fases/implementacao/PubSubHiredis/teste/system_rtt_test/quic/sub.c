@@ -24,6 +24,7 @@
 #include <hiredis/hiredis.h>
 #include <time.h>
 #include <sys/time.h>
+#include "../common.h"
 
 
 #include "msquic.h"
@@ -34,18 +35,8 @@
 #include <pthread.h>
 
 
-#define MAX_STR_LEN 30
-#ifndef CLOCK_REALTIME
-#define CLOCK_REALTIME 0
-#endif
-
-#define PUB 3
-#define BILLION 1000000000
-#define CONN 1
-#define SUB 2
 
 static nng_socket  g_sock;
-const char * g_redis_key; //chave padrao para salvar no redis
 const char * g_topic; //topico padrao para se inscrever
 const char * g_qos;
 int g_count = 0; //contador para saber se é uma possível reconexão(quando o callback de conectado for chamado novamente ele incrementa o valor em 1 e entra dentro de u if que se subscreve novamente no tópico)	
@@ -68,206 +59,6 @@ conf_quic config_user = {
 	.qdiscon_timeout = 30,
 	.qidle_timeout = 30,
 };
-
-typedef struct {
-    const char *value;
-    const char *redis_key;
-} RedisParams;
-
-
-void store_in_redis(const char *value, const char *redis_key) {
-    // Conectar ao servidor Redis na porta 6379 (padrão)
-    redisContext *context = redisConnect("127.0.0.1", 6379);
-    if (context == NULL || context->err) {
-        if (context) {
-            printf("Erro na conexão com o Redis: %s\n", context->errstr);
-            redisFree(context);
-        } else {
-            printf("Erro na alocação do contexto do Redis\n");
-        }
-        return;
-    }
-
-    printf("Conectado ao servidor Redis\n");
-
-    // Salvar o valor no Redis com a chave fornecida ou "valores" como padrão
-    const char *key = redis_key && *redis_key ? redis_key : "valores";
-    redisReply *reply = redisCommand(context, "RPUSH %s \"%s\"", key, value);
-    if (reply == NULL) {
-        printf("Erro ao salvar os dados no Redis\n");
-        redisFree(context);
-        return;
-    }
-    printf("Valor salvo com sucesso no Redis: %s ,na chave: %s\n", value, redis_key );
-    freeReplyObject(reply);
-
-    // Encerrar a conexão com o servidor Redis
-    redisFree(context);
-}
-
-
-void* store_in_redis_async(void *params) {
-    RedisParams *redis_params = (RedisParams *)params;
-    store_in_redis(redis_params->value, redis_params->redis_key);
-    free(params); // Libera a memória alocada para os parametros
-    return NULL;
-}
-
-void store_in_redis_async_call(const char *value, const char *redis_key) {
-    pthread_t thread;
-    RedisParams *params = malloc(sizeof(RedisParams));
-    if (params == NULL) {
-        perror("Erro ao alocar memória para os parâmetros da thread");
-        exit(EXIT_FAILURE);
-    }
-    params->value = value;
-    params->redis_key = redis_key;
-
-    if (pthread_create(&thread, NULL, store_in_redis_async, params) != 0) {
-        perror("Erro ao criar a thread");
-        free(params); // Libera a memória alocada em caso de falha na criação da thread
-        exit(EXIT_FAILURE);
-    }
-
-    // opcional: Se não precisar esperar a thread terminar, você pode desanexá-la, por enquanto preferi deixar a thread rodando
-    pthread_detach(thread);
-}
-
-static void
-fatal(const char *msg, int rv)
-{
-	fprintf(stderr, "%s: %s\n", msg, nng_strerror(rv));
-}
-
-struct timespec string_para_timespec(char *tempo_varchar) {
-    struct timespec tempo;
-    char *ponto = strchr(tempo_varchar, '.');
-    if (ponto != NULL) {
-        *ponto = '\0'; // separa os segundos dos nanossegundos
-        tempo.tv_sec = atol(tempo_varchar);
-        tempo.tv_nsec = atol(ponto + 1);
-    } else {
-        tempo.tv_sec = atol(tempo_varchar);
-        tempo.tv_nsec = 0;
-    }
-    return tempo;
-}
-
-//retorna o temppo de nanosegundos em long long
-long long tempo_atual_nanossegundos() {
-    struct timespec tempo_atual;
-    clock_gettime(CLOCK_REALTIME, &tempo_atual);
-
-    // Converter segundos para nanossegundos e adicionar nanossegundos
-
-
-return tempo_atual.tv_sec * BILLION + tempo_atual.tv_nsec;
-}
-
-//retorna o tempo atual em timespec
-struct timespec tempo_atual_timespec() {
-    struct timespec tempo_atual;
-    clock_gettime(CLOCK_REALTIME, &tempo_atual);
-
-    return tempo_atual;
-}
-
-
-char *tempo_para_varchar() {
-    struct timespec tempo_atual;
-    clock_gettime(CLOCK_REALTIME, &tempo_atual);
-    
-    // Convertendo o tempo para uma string legível
-    char *tempo_varchar = (char *)malloc(MAX_STR_LEN * sizeof(char));
-    if (tempo_varchar == NULL) {
-        perror("Erro ao alocar memória");
-        exit(EXIT_FAILURE);
-    }
-
-    snprintf(tempo_varchar, MAX_STR_LEN, "%ld.%09ld", tempo_atual.tv_sec, tempo_atual.tv_nsec);
-
-    // Retornando a string de tempo
-    return tempo_varchar;
-}
-
-// Função para calcular a diferença entre dois tempos em nanossegundos
-long long diferenca_tempo(struct timespec tempo1, struct timespec tempo2) {
-    long long diff_sec = (long long)(tempo1.tv_sec - tempo2.tv_sec);
-    long long diff_nsec = (long long)(tempo1.tv_nsec - tempo2.tv_nsec);
-    return diff_sec * 1000000000LL + diff_nsec;
-}
-
-// Função para converter diferença de tempo em string
-char *diferenca_para_varchar(long long diferenca) {
-    char *tempo_varchar = (char *)malloc(MAX_STR_LEN * sizeof(char));
-    if (tempo_varchar == NULL) {
-        perror("Erro ao alocar memória");
-        exit(EXIT_FAILURE);
-    }
-    snprintf(tempo_varchar, MAX_STR_LEN, "%lld.%09lld", diferenca / 1000000000LL, diferenca % 1000000000LL);
-    return tempo_varchar;
-}
-
-
-
-
-static nng_msg *
-mqtt_msg_compose(int type, int qos, char *topic, char *payload)
-{
-	// Mqtt connect message
-	nng_msg *msg;
-	nng_mqtt_msg_alloc(&msg, 0);
-
-	if (type == CONN) {
-		nng_mqtt_msg_set_packet_type(msg, NNG_MQTT_CONNECT);
-
-		nng_mqtt_msg_set_connect_proto_version(msg, 4);
-		nng_mqtt_msg_set_connect_keep_alive(msg, 30);
-		nng_mqtt_msg_set_connect_clean_session(msg, true);
-	} else if (type == SUB) {
-		nng_mqtt_msg_set_packet_type(msg, NNG_MQTT_SUBSCRIBE);
-
-		nng_mqtt_topic_qos subscriptions[] = {
-			{
-				.qos   = qos,
-				.topic = {
-					.buf    = (uint8_t *) topic,
-					.length = strlen(topic)
-				}
-			},
-		};
-		int count = sizeof(subscriptions) / sizeof(nng_mqtt_topic_qos);
-
-		nng_mqtt_msg_set_subscribe_topics(msg, subscriptions, count);
-	} 
-	else if (type == PUB) {
-        nng_mqtt_msg_set_packet_type(msg, NNG_MQTT_PUBLISH);
-        nng_mqtt_msg_set_publish_dup(msg, 0);
-        nng_mqtt_msg_set_publish_qos(msg, qos);
-        nng_mqtt_msg_set_publish_retain(msg, 0);
-        nng_mqtt_msg_set_publish_topic(msg, topic);
-        nng_mqtt_msg_set_publish_payload(msg, (uint8_t *)payload, strlen(payload));
-    } 
-	return msg;
-}
-
-void subscription(nng_socket *sock, const char *topic, const char *qos) {
-	int q;
-	q =atoi(qos);
-    nng_msg *msg = mqtt_msg_compose(SUB, q, (char *)topic, NULL);
-    if (msg == NULL) {
-        printf("Failed to compose subscribe message.\n");
-        return;
-    }
-    int rv = nng_sendmsg(*sock, msg, NNG_FLAG_ALLOC);
-    if (rv != 0) {
-        printf("Failed to send subscribe message: %d\n", rv);
-		nng_msleep(1000);//esperar umm segundo para tentar novamente
-    } else {
-        //printf("Successfully subscribed to topic: %s\n", topic);
-    }
-	//return rv,msg;
-}
 
 
 
@@ -320,79 +111,9 @@ msg_send_cb(void *rmsg, void * arg)
 	return 0;
 }
 
-
-
-int publish_operation_resolved(const char *topic, int qos, const char *operation, int val1, int val2, int *msg_sent) {
-    int rv;
-
-    int resultado = 0;
-    char payload[64];  // buffer para resultado em texto
-
-    // Executa a operação
-    if (strcmp(operation, "add") == 0) {
-        resultado = val1 + val2;
-    } else if (strcmp(operation, "sub") == 0) {
-        resultado = val1 - val2;
-    } else if (strcmp(operation, "mul") == 0) {
-        resultado = val1 * val2;
-    } else if (strcmp(operation, "div") == 0) {
-        if (val2 == 0) {
-            snprintf(payload, sizeof(payload), "Erro: divisao por zero");
-        } else {
-            resultado = val1 / val2;
-        }
-    } else {
-        snprintf(payload, sizeof(payload), "Operacao invalida");
-    }
-
-    // Se não houve erro na divisao, monta o payload com o resultado
-    if (strlen(payload) == 0) {
-        snprintf(payload, sizeof(payload), "%d", resultado);
-    }
-
-    nng_msg *msg = mqtt_msg_compose(PUB, qos, (char *)topic, payload);
-    if (msg == NULL) {
-        printf("Erro ao compor mensagem publish.\n");
-        return -1;
-    }
-
-    // Enviar a mensagem
-    rv = nng_sendmsg(g_sock, msg, NNG_FLAG_NONBLOCK);
-    if (rv != 0) {
-        fatal("nng_sendmsg", rv);
-        return rv;
-    }
-
-
-    
-
-    return 0;
-}
-
-
-void publish(const char *topic, int q, int *msg_sent)
-{
-    
-    *msg_sent = 0; // Reset the flag
-	char *tempo_atual_varchar = tempo_para_varchar();
-    nng_msg *msg = mqtt_msg_compose(PUB, q, (char *)topic, tempo_para_varchar());
-    printf("Tempo atual em varchar: %s\n", tempo_atual_varchar);
-    nng_sendmsg(g_sock, msg, NNG_FLAG_ALLOC);
-
-    // Wait for the message to be sent
-    while (!(*msg_sent)) {
-        nng_msleep(1); // Sleep for a short duration to avoid busy waiting
-    }
-	*msg_sent = 0; // Reset the flag
-    free(tempo_atual_varchar);
-}
-
-
-
-
 //callback do subscriber
 static int
-msg_recv_cb(void *rmsg, void * arg)
+msg_recv_cb_subscriber(void *rmsg, void * arg)
 {	
 	int q = atoi(g_qos);
 
@@ -425,9 +146,7 @@ msg_recv_cb(void *rmsg, void * arg)
 		   int flag = 0;
 	   
 		   // Chamar publish com a operação, valores e tópico de resultado
-		   publish_operation_resolved(response_topic, 0, oper, v1, v2, &flag);
-	//store_in_redis(valor_redis, g_redis_key);
-	//store_in_redis_async_call(valor_redis, g_redis_key);
+		   publish_operation_resolved(&g_sock,response_topic, 0, oper, v1, v2, &flag);
 	nng_msg_free(msg);
 	return 0;
 	
@@ -461,7 +180,7 @@ client(int type, const char *url, const char *qos, const char *topic, const char
 
 	if (0 != nng_mqtt_quic_set_connect_cb(&sock, connect_cb, (void *)arg) ||
 	    0 != nng_mqtt_quic_set_disconnect_cb(&sock, disconnect_cb, (void *)arg) ||
-	    0 != nng_mqtt_quic_set_msg_recv_cb(&sock, msg_recv_cb, (void *)arg) ||
+	    0 != nng_mqtt_quic_set_msg_recv_cb(&sock, msg_recv_cb_subscriber, (void *)arg) ||
 	    0 != nng_mqtt_quic_set_msg_send_cb(&sock, msg_send_cb, (void *)arg)) {
 		printf("error in quic client cb set.\n");
 	}

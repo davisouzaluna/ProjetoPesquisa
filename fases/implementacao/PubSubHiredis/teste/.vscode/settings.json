@@ -11,6 +11,7 @@
         "time.h": "c",
         "platform.h": "c",
         "stdio.h": "c",
-        "cerrno": "c"
+        "cerrno": "c",
+        "common.h": "c"
     }
 }
