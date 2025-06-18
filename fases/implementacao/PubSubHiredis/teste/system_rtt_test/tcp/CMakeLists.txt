@@ -25,11 +25,17 @@ if (DEBUG)
   endif (TSAN)
 endif (DEBUG)
 
-add_executable(pub pub.c)
-add_executable(sub_tcp sub_tcp.c)
 
-target_link_libraries(pub nng::nng hiredis)
-target_link_libraries(pub ${CMAKE_THREAD_LIBS_INIT})
+include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../common)
+
+# Variável com o arquivo(s) comum(s) para compilar junto
+set(COMMON_SOURCES ../common.c)  # ajuste o nome do arquivo conforme o que existir em common
+add_executable(pub pub.c ${COMMON_SOURCES})
+add_executable(sub_tcp sub_tcp.c ${COMMON_SOURCES})
+
+
+target_link_libraries(pub nng::nng hiredis )
+target_link_libraries(pub ${CMAKE_THREAD_LIBS_INIT} )
 
 target_link_libraries(sub_tcp nng::nng hiredis)
 target_link_libraries(sub_tcp ${CMAKE_THREAD_LIBS_INIT})

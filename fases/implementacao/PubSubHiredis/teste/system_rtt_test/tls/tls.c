@@ -385,9 +385,9 @@ void *publisher_thread(void *arg)
 {
     publisher_args_t *args = (publisher_args_t *)arg;
     const char *operacoes[] = {"add", "sub", "mul", "div"};
-    clock_gettime(CLOCK_REALTIME, &start_time_rtt);
     for (uint32_t i = 0; i < args->num_packets && keepRunning; i++)
     {
+        clock_gettime(CLOCK_REALTIME, &start_time_rtt);
         int val1 = (rand() % 100) + 1;
         int val2 = (rand() % 100) + 1;
         const char *op = operacoes[rand() % 4];
@@ -399,6 +399,7 @@ void *publisher_thread(void *arg)
             nng_msleep(args->interval_ms);
         }
     }
+    printf("Time taken to connect: %.9f seconds\n", time_connection);
 
     return NULL;
 }

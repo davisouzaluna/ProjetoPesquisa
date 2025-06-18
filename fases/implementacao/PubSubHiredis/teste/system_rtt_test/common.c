@@ -1,4 +1,6 @@
 #include "common.h"
+
+
 const char *g_redis_key = "valores";
 void fatal(const char *msg, int rv)
 {
@@ -258,6 +260,38 @@ int publish_operation(nng_socket *sock,const char *topic, int qos, const char *o
     return 0;
 }
 
+
+int resolve_operation(const char *operation, int val1, int val2){
+
+    int resultado = 0;
+    char payload[64];
+
+    if (strcmp(operation, "add") == 0) {
+        resultado = val1 + val2;
+    } else if (strcmp(operation, "sub") == 0) {
+        resultado = val1 - val2;
+    } else if (strcmp(operation, "mul") == 0) {
+        resultado = val1 * val2;
+    } else if (strcmp(operation, "div") == 0) {
+        if (val2 == 0) {
+            snprintf(payload, sizeof(payload), "Erro: divisao por zero");
+        } else {
+            resultado = val1 / val2;
+        }
+    } else {
+        snprintf(payload, sizeof(payload), "Operacao invalida");
+    }
+
+    // Se não houve erro na divisao, monta o payload com o resultado
+    if (strlen(payload) == 0) {
+        snprintf(payload, sizeof(payload), "%d", resultado);
+    }
+
+    return resultado;
+}
+
+
+
 int publish_operation_resolved(nng_socket *sock,const char *topic, int qos, const char *operation, int val1, int val2, int *msg_sent) {
     int rv;
 
@@ -303,4 +337,242 @@ int publish_operation_resolved(nng_socket *sock,const char *topic, int qos, cons
     
 
     return 0;
+}
+
+int configurar_dialer(nng_socket *sock, nng_dialer *dialer, const char *url, 
+                     tls_config *tls, bool verbose) {
+    int rv;
+
+    // Criar dialer
+    if ((rv = nng_dialer_create(dialer, *sock, url)) != 0) {
+        printf("Erro ao criar dialer: %s\n", nng_strerror(rv));
+        return rv;
+    }
+
+    // Configurar TLS se necessário
+    if (tls != NULL && strstr(url, "tls+mqtt") != NULL) {
+        nng_tls_config *cfg;
+        
+        if ((rv = nng_tls_config_alloc(&cfg, NNG_TLS_MODE_CLIENT)) != 0) {
+            printf("Erro na configuração TLS: %s\n", nng_strerror(rv));
+            return rv;
+        }
+
+        if (tls->cert != NULL && tls->key != NULL) {
+            nng_tls_config_auth_mode(cfg, NNG_TLS_AUTH_MODE_REQUIRED);
+            if ((rv = nng_tls_config_own_cert(cfg, tls->cert, tls->key, tls->pass)) != 0) {
+                nng_tls_config_free(cfg);
+                return rv;
+            }
+        }
+
+        if (tls->ca != NULL) {
+            if ((rv = nng_tls_config_ca_chain(cfg, tls->ca, NULL)) != 0) {
+                nng_tls_config_free(cfg);
+                return rv;
+            }
+        }
+
+        rv = nng_dialer_set_ptr(*dialer, NNG_OPT_TLS_CONFIG, cfg);
+        nng_tls_config_free(cfg);
+        
+        if (rv != 0) {
+            return rv;
+        }
+    }
+
+    // Criar e configurar mensagem CONNECT
+    nng_msg *connmsg;
+    if ((rv = nng_mqtt_msg_alloc(&connmsg, 0)) != 0) {
+        return rv;
+    }
+
+    // Configurar mensagem CONNECT
+    nng_mqtt_msg_set_packet_type(connmsg, NNG_MQTT_CONNECT);
+    nng_mqtt_msg_set_connect_proto_version(connmsg, 4);
+    nng_mqtt_msg_set_connect_keep_alive(connmsg, 60);
+    nng_mqtt_msg_set_connect_clean_session(connmsg, true);
+
+    // Gerar client_id único
+    char client_id[32];
+    snprintf(client_id, sizeof(client_id), "client_%ld", time(NULL));
+    nng_mqtt_msg_set_connect_client_id(connmsg, client_id);
+
+    // Configurar mensagem CONNECT no dialer
+    if ((rv = nng_dialer_set_ptr(*dialer, NNG_OPT_MQTT_CONNMSG, connmsg)) != 0) {
+        nng_msg_free(connmsg);
+        return rv;
+    }
+
+    if (verbose) {
+        printf("Dialer configurado para %s\n", url);
+    }
+
+    return 0;
+}
+
+void intHandler(int dummy)
+{
+    keepRunning = 0;
+    fprintf(stderr, "\nclient exit(0).\n");
+    exit(0);
+}
+
+// Print the given string limited to 80 columns.
+void print80(const char *prefix, const char *str, size_t len, bool quote)
+{
+    size_t max_len = 80 - strlen(prefix) - (quote ? 2 : 0);
+    char *q = quote ? "'" : "";
+    if (len <= max_len)
+    {
+        // case the output fit in a line
+        printf("%s%s%.*s%s\n", prefix, q, (int)len, str, q);
+    }
+    else
+    {
+        // case we truncate the payload with ellipses
+        printf("%s%s%.*s%s...\n", prefix, q, (int)(max_len - 3), str, q);
+    }
+}
+
+
+int publish_operation_tcp(nng_socket sock, const char *topic, uint8_t qos, const char *operation, int val1, int val2, bool verbose) {
+    int rv;
+
+    // Criar uma mensagem PUBLISH
+    nng_msg *pubmsg;
+    nng_mqtt_msg_alloc(&pubmsg, 0);
+    nng_mqtt_msg_set_packet_type(pubmsg, NNG_MQTT_PUBLISH);
+    nng_mqtt_msg_set_publish_dup(pubmsg, 0);
+    nng_mqtt_msg_set_publish_qos(pubmsg, qos);
+    nng_mqtt_msg_set_publish_retain(pubmsg, 0);
+
+    char payload[64];
+    snprintf(payload, sizeof(payload), "%s %d %d", operation, val1, val2);
+
+    // Definir o payload da mensagem
+    nng_mqtt_msg_set_publish_payload(pubmsg, (uint8_t *)payload, strlen(payload));
+
+    // Definir o tópico da mensagem
+    nng_mqtt_msg_set_publish_topic(pubmsg, topic);
+
+    if (verbose) {
+        uint8_t print[1024] = {0};
+        nng_mqtt_msg_dump(pubmsg, print, 1024, true);
+        printf("%s\n", print);
+    }
+
+    printf("Publishing to '%s' with payload '%s'...\n", topic, payload);
+
+    // Enviar a mensagem
+    if ((rv = nng_sendmsg(sock, pubmsg, NNG_FLAG_NONBLOCK)) != 0) {
+        fatal("nng_sendmsg", rv);
+    }
+
+    return rv;
+}
+
+
+
+
+
+
+// metodos TLS
+
+void loadfile(const char *path, void **datap, size_t *lenp)
+{
+    FILE *f;
+    size_t total_read = 0;
+    size_t allocation_size = BUFSIZ;
+    char *fdata;
+    char *realloc_result;
+
+    if ((f = fopen(path, "rb")) == NULL)
+    {
+        fprintf(stderr, "Cannot open file %s: %s", path, strerror(errno));
+        exit(1);
+    }
+
+    if ((fdata = malloc(allocation_size + 1)) == NULL)
+    {
+        fprintf(stderr, "Out of memory.");
+    }
+
+    while (1)
+    {
+        total_read += fread(fdata + total_read, 1, allocation_size - total_read, f);
+        if (ferror(f))
+        {
+            if (errno == EINTR)
+            {
+                continue;
+            }
+            fprintf(stderr, "Read from %s failed: %s", path, strerror(errno));
+            exit(1);
+        }
+        if (feof(f))
+        {
+            break;
+        }
+        if (total_read == allocation_size)
+        {
+            if (allocation_size > SIZE_MAX / 2)
+            {
+                fprintf(stderr, "Out of memory.");
+            }
+            allocation_size *= 2;
+            if ((realloc_result = realloc(fdata, allocation_size + 1)) == NULL)
+            {
+                free(fdata);
+                fprintf(stderr, "Out of memory.");
+                exit(1);
+            }
+            fdata = realloc_result;
+        }
+    }
+    if (f != stdin)
+    {
+        fclose(f);
+    }
+    fdata[total_read] = '\0';
+    *datap = fdata;
+    *lenp = total_read;
+}
+
+int init_dialer_tls(nng_dialer d, const char *cacert, const char *cert, const char *key, const char *pass)
+{
+    nng_tls_config *cfg;
+    int rv;
+
+    if ((rv = nng_tls_config_alloc(&cfg, NNG_TLS_MODE_CLIENT)) != 0)
+    {
+        return (rv);
+    }
+
+    if (cert != NULL && key != NULL)
+    {
+        nng_tls_config_auth_mode(cfg, NNG_TLS_AUTH_MODE_REQUIRED);
+        if ((rv = nng_tls_config_own_cert(cfg, cert, key, pass)) != 0)
+        {
+            goto out;
+        }
+    }
+    else
+    {
+        nng_tls_config_auth_mode(cfg, NNG_TLS_AUTH_MODE_NONE);
+    }
+
+    if (cacert != NULL)
+    {
+        if ((rv = nng_tls_config_ca_chain(cfg, cacert, NULL)) != 0)
+        {
+            goto out;
+        }
+    }
+
+    rv = nng_dialer_set_ptr(d, NNG_OPT_TLS_CONFIG, cfg);
+
+out:
+    nng_tls_config_free(cfg);
+    return (rv);
 }
