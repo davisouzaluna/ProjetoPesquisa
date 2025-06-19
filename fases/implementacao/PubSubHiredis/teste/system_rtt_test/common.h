@@ -17,7 +17,7 @@
 
 
 //caso for compilar com TLS, o header do TLS vai estar incluso
-#ifndef NNG_SUPP_TLS
+#ifdef NNG_SUPP_TLS
 #include <nng/supplemental/tls/tls.h>
 
 // Definições TLS
@@ -33,21 +33,18 @@
 #define NNG_TLS_AUTH_MODE_REQUIRED 2
 #endif
 
-// Estrutura para configuração TLS
-typedef struct {
-    const char *cert;
-    const char *key;
-    const char *ca;
-    const char *pass;
-} tls_config;
-
 // Funções TLS
 extern int init_dialer_tls(nng_dialer d, const char *cacert, const char *cert, const char *key, const char *pass);
 extern void loadfile(const char *path, void **datap, size_t *lenp);
 
 #endif
 
-
+typedef struct {
+    const char *cert;
+    const char *key;
+    const char *ca;
+    const char *pass;
+} tls_config;
 
 int configurar_dialer(nng_socket *sock, nng_dialer *dialer, const char *url, 
                      tls_config *tls, bool verbose);

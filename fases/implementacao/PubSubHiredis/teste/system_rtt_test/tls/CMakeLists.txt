@@ -19,7 +19,9 @@ endif (BUILD_DEMO)
 find_package(Threads)
 # Definir MBEDsub_tls_ROOT_DIR usando variável de ambiente
 
+include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../common)
 
+set(COMMON_SOURCES ../common.c) 
 
 
 if (DEBUG)
@@ -39,6 +41,10 @@ target_link_libraries(sub_tls ${CMAKE_THREAD_LIBS_INIT})
 add_executable(pub_tls tls.c)
 target_link_libraries(pub_tls nng::nng hiredis)
 target_link_libraries(pub_tls ${CMAKE_THREAD_LIBS_INIT})
+
+add_executable(pub_tls2 pub.c ${COMMON_SOURCES})
+target_link_libraries(pub_tls2 nng::nng hiredis)
+target_link_libraries(pub_tls2 ${CMAKE_THREAD_LIBS_INIT})
 
 if(NNG_ENABLE_TLS)
     find_package(MbedTLS)

@@ -18,11 +18,9 @@ if (DEBUG)
   endif()
 endif()
 
-# Adiciona o diretório common para includes
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../common)
 
-# Variável com o arquivo(s) comum(s) para compilar junto
-set(COMMON_SOURCES ../common.c)  # ajuste o nome do arquivo conforme o que existir em common
+set(COMMON_SOURCES ../common.c) 
 
 # Adiciona os executáveis incluindo os arquivos comuns
 add_executable(publisher pub.c ${COMMON_SOURCES})
