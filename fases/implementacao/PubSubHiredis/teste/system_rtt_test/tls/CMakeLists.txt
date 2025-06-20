@@ -34,7 +34,7 @@ if (DEBUG)
   endif (TSAN)
 endif (DEBUG)
 
-add_executable(sub_tls sub_tls.c)
+add_executable(sub_tls sub_tls.c ${COMMON_SOURCES})
 target_link_libraries(sub_tls nng::nng hiredis)
 target_link_libraries(sub_tls ${CMAKE_THREAD_LIBS_INIT})
 
