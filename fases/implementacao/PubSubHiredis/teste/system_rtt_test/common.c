@@ -1,5 +1,5 @@
 #include "common.h"
-
+int keepRunning = 1;
 
 const char *g_redis_key = "valores";
 void fatal(const char *msg, int rv)
