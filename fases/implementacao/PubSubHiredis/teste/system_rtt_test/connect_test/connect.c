@@ -150,6 +150,8 @@ int tls_connect(const char *url, const char *redis_key,
     {
         fatal("nng_dialer_start", rv);
     }
+
+    nng_sendmsg(sock, msg, NNG_FLAG_ALLOC);
     clock_gettime(CLOCK_REALTIME, &end_time);
     long long diff_rtt=diferenca_tempo(end_time, start_time);
     const char *diff = diferenca_para_varchar(diff_rtt);
@@ -184,6 +186,9 @@ int tcp_connect(const char *url, const char *redis_key)
     int rv;
     nng_msg *msg;
 
+    char *verbose_env = getenv("VERBOSE");
+    bool verbose = verbose_env && strlen(verbose_env) > 0;
+
     if ((rv = nng_mqtt_client_open(&sock)) != 0) {
         printf("Error opening MQTT client: %s\n", nng_strerror(rv));
         return rv;
@@ -195,21 +200,25 @@ int tcp_connect(const char *url, const char *redis_key)
         return rv;
     }
 
+    msg = mqtt_msg_compose(CONN, 0, NULL, NULL);
     if ((rv = configurar_dialer(&sock, &dialer, url, NULL, false)) != 0) {
         fatal("configurar_dialer", rv);
     }
+    
 
     // Configurar mensagem CONNECT no dialer
     if ((rv = nng_dialer_set_ptr(dialer, NNG_OPT_MQTT_CONNMSG, msg)) != 0) {
         fatal("nng_dialer_set_ptr", rv);
     }
 
-    msg = mqtt_msg_compose(CONN, 0, NULL, NULL);
     struct timespec start_time, end_time;
     clock_gettime(CLOCK_REALTIME, &start_time);
     if ((rv = nng_dialer_start(dialer, NNG_FLAG_NONBLOCK)) != 0) {
         fatal("nng_dialer_start", rv);
     }
+
+    nng_sendmsg(sock, msg, NNG_FLAG_ALLOC);
+    
 
     clock_gettime(CLOCK_REALTIME, &end_time);
 

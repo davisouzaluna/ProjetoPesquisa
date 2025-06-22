@@ -158,12 +158,14 @@ int tls_client(const char *url, uint8_t proto_ver, const char *ca, const char *c
     struct timespec start_time, end_time;
     clock_gettime(CLOCK_REALTIME, &start_time);
 
-    //enviando connect pkt
+    
     
     if ((rv = nng_dialer_start(dialer, NNG_FLAG_ALLOC)) != 0)
     {
         fatal("nng_dialer_start", rv);
     }
+    //enviando connect pkt
+    nng_sendmsg(sock, msg, NNG_FLAG_ALLOC);
 
     clock_gettime(CLOCK_REALTIME, &end_time);
 
