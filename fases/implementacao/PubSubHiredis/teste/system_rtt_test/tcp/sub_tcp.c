@@ -2,7 +2,7 @@
 #include <stdint.h>
 #include "../common.h"
 
-int keepRunning = 1;
+//int keepRunning = 1;
 // Callback para quando recebe mensagem
 static void send_callback(nng_mqtt_client *client, nng_msg *msg, void *arg)
 {

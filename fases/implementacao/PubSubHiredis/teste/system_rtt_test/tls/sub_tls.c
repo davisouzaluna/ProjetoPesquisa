@@ -32,7 +32,7 @@
 #include "../common.h"
 #define SUBSCRIBE "sub"
 
-int keepRunning = 1;
+//int keepRunning = 1;
 
 typedef struct
 {

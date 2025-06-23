@@ -34,7 +34,7 @@
 
 pthread_t pub_thread;
 extern struct timespec start_time_rtt, end_time_rtt;
-int keepRunning = 1;
+//int keepRunning = 1;
 
 #define PUBLISH "pub"
 
