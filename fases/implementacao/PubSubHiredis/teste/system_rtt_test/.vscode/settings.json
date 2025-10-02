@@ -1,0 +1,7 @@
+{
+    "files.associations": {
+        "common.h": "c",
+        "msquic.h": "c",
+        "mqtt_quic.h": "c"
+    }
+}

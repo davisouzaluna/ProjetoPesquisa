@@ -146,7 +146,7 @@ int main(const int argc, const char **argv) {
         fatal("nng_dialer_start", rv);
     }
 
-    nng_sendmsg(sock, msg, NNG_FLAG_ALLOC);
+    //nng_sendmsg(sock, msg, NNG_FLAG_ALLOC);
     // Aguardar conexão ser estabelecida
     //nng_msleep(100);
 

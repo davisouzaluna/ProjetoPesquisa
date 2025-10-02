@@ -77,13 +77,15 @@ int quic_connect(const char *url, const char *redis_key)
     const char *diff = diferenca_para_varchar(diff_rtt);
     
 
-
+    
     // Close the socket
     if ((rv = nng_close(sock)) != 0) {
         printf("Error closing socket: %s\n", nng_strerror(rv));
         return rv;
     }
     store_in_redis(diff, redis_key);
+    free((void*)diff);
+    
     return 0;
 }
 
@@ -92,22 +94,21 @@ int quic_connect(const char *url, const char *redis_key)
 
 #ifdef NNG_SUPP_TLS
 
-static void disconnect_cb_tls(nng_pipe p, nng_pipe_ev ev, void *arg)
-{
-    int reason = 0;
-    nng_pipe_get_int(p, NNG_OPT_MQTT_DISCONNECT_REASON, &reason);
-    printf("%s: disconnected! RC [%d] \n", __FUNCTION__, reason);
-
-
-}
-
-static void connect_cb_tls(nng_pipe p, nng_pipe_ev ev, void *arg)
+static void connect_cb_tls(nng_pipe pipe, nng_pipe_ev ev, void *arg)
 {
     int reason;
-    nng_pipe_get_int(p, NNG_OPT_MQTT_CONNECT_REASON, &reason);
+    nng_pipe_get_int(pipe, NNG_OPT_MQTT_CONNECT_REASON, &reason);
     printf("%s: connected! RC [%d] \n", __FUNCTION__, reason);
     (void) ev;
     (void) arg;
+}
+
+static void disconnect_cb_tls(nng_pipe pipe, nng_pipe_ev ev, void *arg)
+{
+     int reason = 0;
+    nng_pipe_get_int(pipe, NNG_OPT_MQTT_DISCONNECT_REASON, &reason);
+    printf("%s: disconnected! RC [%d] \n", __FUNCTION__, reason);
+
 }
 
 int tls_connect(const char *url, const char *redis_key,
@@ -116,8 +117,8 @@ int tls_connect(const char *url, const char *redis_key,
     nng_socket sock;
     int rv;
     nng_dialer dialer;
-    nng_msg *msg;
-    bool verbose = getenv("VERBOSE") && strlen(getenv("VERBOSE")) > 0;
+    char *verbose_env = getenv("VERBOSE");
+    bool verbose = verbose_env && strlen(verbose_env) > 0;
 
     if ((rv = nng_mqtt_client_open(&sock)) != 0)
         fatal("nng_socket", rv);
@@ -135,35 +136,32 @@ int tls_connect(const char *url, const char *redis_key,
         return rv;
     }
 
-    if ((rv = configurar_dialer(&sock, &dialer, url, &tls_cfg, verbose)) != 0) {
+    // Só chama configurar_dialer, não crie msg manualmente!
+    if ((rv = configurar_dialer(&sock, &dialer, url, &tls_cfg, false)) != 0) {
         fatal("configurar_dialer", rv);
-    }
-
-    msg = mqtt_msg_compose(CONN, 0, NULL, NULL);
-    if ((rv = nng_dialer_set_ptr(dialer, NNG_OPT_MQTT_CONNMSG, msg)) != 0) {
-        fatal("nng_dialer_set_ptr", rv);
     }
 
     struct timespec start_time, end_time;
     clock_gettime(CLOCK_REALTIME, &start_time);
-    if ((rv = nng_dialer_start(dialer, NNG_FLAG_ALLOC)) != 0)
-    {
+
+    if ((rv = nng_dialer_start(dialer, NNG_FLAG_ALLOC)) != 0) {
         fatal("nng_dialer_start", rv);
     }
 
-    nng_sendmsg(sock, msg, NNG_FLAG_ALLOC);
     clock_gettime(CLOCK_REALTIME, &end_time);
-    long long diff_rtt=diferenca_tempo(end_time, start_time);
+
+    long long diff_rtt = diferenca_tempo(end_time, start_time);
     const char *diff = diferenca_para_varchar(diff_rtt);
-    
 
-
-    // Close the socket
-    if ((rv = nng_close(sock)) != 0) {
-        printf("Error closing socket: %s\n", nng_strerror(rv));
+    store_in_redis(diff, redis_key);
+    free((void*)diff);
+    // Close the dialer
+    if ((rv = nng_dialer_close(dialer)) != 0)
+    {
+        printf("Error closing dialer: %s\n", nng_strerror(rv));
         return rv;
     }
-    store_in_redis(diff, redis_key);
+
     return 0;
 }
 
@@ -184,7 +182,6 @@ int tcp_connect(const char *url, const char *redis_key)
     nng_dialer dialer;
     nng_socket sock;
     int rv;
-    nng_msg *msg;
 
     char *verbose_env = getenv("VERBOSE");
     bool verbose = verbose_env && strlen(verbose_env) > 0;
@@ -200,24 +197,14 @@ int tcp_connect(const char *url, const char *redis_key)
         return rv;
     }
 
-    msg = mqtt_msg_compose(CONN, 0, NULL, NULL);
     if ((rv = configurar_dialer(&sock, &dialer, url, NULL, false)) != 0) {
-        fatal("configurar_dialer", rv);
-    }
-    
-
-    // Configurar mensagem CONNECT no dialer
-    if ((rv = nng_dialer_set_ptr(dialer, NNG_OPT_MQTT_CONNMSG, msg)) != 0) {
-        fatal("nng_dialer_set_ptr", rv);
-    }
-
+    fatal("configurar_dialer", rv);
+}
     struct timespec start_time, end_time;
     clock_gettime(CLOCK_REALTIME, &start_time);
     if ((rv = nng_dialer_start(dialer, NNG_FLAG_NONBLOCK)) != 0) {
         fatal("nng_dialer_start", rv);
     }
-
-    nng_sendmsg(sock, msg, NNG_FLAG_ALLOC);
     
 
     clock_gettime(CLOCK_REALTIME, &end_time);
@@ -233,6 +220,7 @@ int tcp_connect(const char *url, const char *redis_key)
         return rv;
     }
     store_in_redis(diff, redis_key);
+    free((void*)diff);
     return 0;
 
     
@@ -254,9 +242,14 @@ int main(int argc, char *argv[]) {
     if (qtd < 1) qtd = 1;
     const char *redis_key = (argc >= 5) ? argv[4] : "valores";
 
+    size_t file_len;
     // TLS params (ajuste se necessário)
-    const char *ca = NULL, *cert = NULL, *key = NULL, *pass = NULL;
+    char *ca = NULL;
+    char *cert = NULL;
+    char *key = NULL;
+    char *pass = NULL;
 
+    
     for (int i = 0; i < qtd; i++) {
         if (strcmp(protocolo, "tcp") == 0) {
             tcp_connect(ip, redis_key);

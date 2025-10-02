@@ -22,6 +22,7 @@ if(NNG_ENABLE_TLS)
     if(MbedTLS_FOUND)
         target_link_libraries(connect mbedtls mbedx509 mbedcrypto)
         target_compile_definitions(connect PRIVATE NNG_SUPP_TLS)
+        add_definitions(-DNNG_SUPP_TLS)
     endif()
 endif()
 

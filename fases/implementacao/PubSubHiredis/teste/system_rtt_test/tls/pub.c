@@ -165,7 +165,7 @@ int tls_client(const char *url, uint8_t proto_ver, const char *ca, const char *c
         fatal("nng_dialer_start", rv);
     }
     //enviando connect pkt
-    nng_sendmsg(sock, msg, NNG_FLAG_ALLOC);
+    //nng_sendmsg(sock, msg, NNG_FLAG_ALLOC);
 
     clock_gettime(CLOCK_REALTIME, &end_time);
 
